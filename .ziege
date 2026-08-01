@@ -1,0 +1,7 @@
+systems:
+  S4:
+    folder: S4
+    provider: mock
+  S5:
+    folder: S5
+    provider: mock
