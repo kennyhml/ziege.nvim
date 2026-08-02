@@ -12,42 +12,30 @@ vim.opt.runtimepath:append(oil_path)
 local provider = require("ziege.provider.mock").new({
   systems = {
     S4 = {
-      transports = {
-        { id = "DEVK900001", label = "DEVK900001: Ziege demo" },
-        { id = "DEVK900002", label = "DEVK900002: Local experiments" },
-      },
-      packages = {
-        ["/acme/core"] = { description = "Core package" },
-        ["/acme/sales"] = { description = "Sales package" },
-        ["/acme/core_test"] = { parent = "/acme/core", description = "Core tests" },
-      },
-      objects = {
-        ["class:/acme/zcl_order"] = {
-          kind = "class",
-          name = "/acme/zcl_order",
-          package = "/acme/core",
-          description = "Order service",
-          source = {
-            "CLASS /acme/zcl_order DEFINITION PUBLIC FINAL CREATE PUBLIC.",
-            "ENDCLASS.",
-            "",
-            "CLASS /acme/zcl_order IMPLEMENTATION.",
-            "ENDCLASS.",
-          },
-        },
-        ["interface:/acme/zif_order"] = {
-          kind = "interface",
-          name = "/acme/zif_order",
-          package = "/acme/core",
-          description = "Order contract",
-          source = {
-            "INTERFACE /acme/zif_order PUBLIC.",
-            "ENDINTERFACE.",
+      children = {
+        {
+          id = "objects",
+          name = "Objects",
+          type = "directory",
+          virtual = true,
+          children = {
+            {
+              id = "order",
+              name = "/acme/zcl_order.clas.abap",
+              type = "file",
+              extension = "clas.abap",
+              filetype = "abap",
+              source = {
+                "CLASS /acme/zcl_order DEFINITION PUBLIC FINAL CREATE PUBLIC.",
+                "ENDCLASS.",
+              },
+            },
           },
         },
       },
     },
   },
+  extensions = { "clas.abap" },
 })
 
 require("ziege").setup({
@@ -63,5 +51,5 @@ require("oil").setup({
 })
 
 vim.schedule(function()
-  require("oil").open("abap://S4/packages/")
+  vim.cmd("Ziege S4")
 end)

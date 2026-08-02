@@ -1,7 +1,12 @@
+version: 1
 systems:
   S4:
     folder: S4
-    provider: mock
-  S5:
-    folder: S5
-    provider: mock
+    provider: adt
+    destination: S4
+    mounts:
+      - kind: package
+        label: Flight
+        package: /DMO/FLIGHT
+      - kind: systemLibrary
+        label: System Library

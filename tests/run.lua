@@ -29,32 +29,23 @@ local function wait_for(predicate, context)
   assert_true(vim.wait(3000, predicate, 10), context or "Timed out")
 end
 
+local function line_with(lines, value)
+  for index, line in ipairs(lines) do
+    if line:find(value, 1, true) then
+      return index, line
+    end
+  end
+end
+
 local function open_oil(url)
   require("oil").open(url)
   local bufnr = vim.api.nvim_get_current_buf()
   wait_for(function()
-    return vim.b[bufnr].oil_ready and not vim.b[bufnr].oil_rendering
+    return vim.api.nvim_buf_is_valid(bufnr)
+      and vim.b[bufnr].oil_ready
+      and not vim.b[bufnr].oil_rendering
   end, "Oil did not finish rendering " .. url)
   return bufnr
-end
-
-local function set_lines(bufnr, lines)
-  vim.bo[bufnr].modifiable = true
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, true, lines)
-  vim.bo[bufnr].modified = true
-end
-
-local function save_oil()
-  local done = false
-  local save_error
-  require("oil").save({ confirm = false }, function(err)
-    save_error = err
-    done = true
-  end)
-  wait_for(function()
-    return done
-  end, "Oil save did not finish")
-  return save_error
 end
 
 test("wizard UI uses a floating input and delegates selections", function()
@@ -65,7 +56,7 @@ test("wizard UI uses a floating input and delegates selections", function()
   vim.v.errmsg = ""
   local done = false
   local value
-  ui.input({ prompt = "Description" }, function(result)
+  ui.input({ prompt = "Purpose" }, function(result)
     value = result
     done = true
   end)
@@ -95,447 +86,431 @@ test("wizard UI uses a floating input and delegates selections", function()
   assert_equal("two", value)
 end)
 
-test("segment codec preserves atomic slash names", function()
-  local model = require("ziege.model")
-  local encoded = model.encode_segment("/ACME/ZCL_ORDER.clas.abap")
-  assert_equal("%2FACME%2FZCL_ORDER.clas.abap", encoded)
-  assert_equal("/ACME/ZCL_ORDER.clas.abap", model.decode_segment(encoded))
-end)
+test("Oil routes are readable while preserving opaque provider identities", function()
+  local codec = require("ziege.codec")
+  local route = require("ziege.adapters.oil.route")
+  local value = "/Acme/Mixed Name.widget.json"
+  assert_equal(value, codec.decode_segment(codec.encode_segment(value)))
+  route.clear()
 
-test("routes retain package and facet context", function()
-  local route = require("ziege.route")
-  local parsed = assert(route.parse("abap://S4/packages/%2FACME%2FCORE.devc/classes/"))
-  assert_equal("facet", parsed.kind)
-  assert_equal("S4", parsed.system)
-  assert_equal("/acme/core", parsed.package)
-  assert_equal("classes", parsed.facet)
-  assert_equal("abap://S4/packages/%2Facme%2Fcore.devc/", route.parent(parsed.url))
-  local nested = assert(
-    route.parse("abap://S4/packages/%2FACME%2FCORE.devc/packages/%2FACME%2FSUB.devc/interfaces/")
-  )
-  assert_equal({ "/acme/core", "/acme/sub" }, nested.packages)
+  local first_system = {
+    token = "opaque-system-one",
+    name = "S4",
+    folder = "S4",
+    project_root = "/tmp/one/project",
+  }
+  local second_system = vim.tbl_extend("force", {}, first_system, {
+    token = "opaque-system-two",
+    project_root = "/tmp/two/project",
+  })
+  local first_root = route.system_url(first_system)
+  local second_root = route.system_url(second_system)
+  assert_equal("abap://S4@project/", first_root)
+  assert_equal("abap://S4@project~2/", second_root)
+
+  route.update_directory(first_root, {
+    { id = "folder/id", name = "Flight", type = "directory" },
+    { id = "class:42", name = "(dmo)tatfta.clas.abap", type = "file" },
+    { id = "slash", name = "/dmo/tatfta.clas.abap", type = "file" },
+  })
+  assert_equal("abap://S4@project/Flight/", assert(route.node_url(first_root, "folder/id")))
   assert_equal(
-    "abap://S4/packages/%2Facme%2Fcore.devc/packages/%2Facme%2Fsub.devc/",
-    route.parent(nested.url)
+    "abap://S4@project/(dmo)tatfta.clas.abap",
+    assert(route.node_url(first_root, "class:42"))
   )
+  assert_equal(
+    "abap://S4@project/%2Fdmo%2Ftatfta.clas.abap",
+    assert(route.node_url(first_root, "slash"))
+  )
+  local duplicate_routes, duplicate_error = route.update_directory(first_root, {
+    { id = "duplicate-one", name = "Duplicate", type = "file" },
+    { id = "duplicate-two", name = "Duplicate", type = "file" },
+  })
+  assert_equal(nil, duplicate_routes)
+  assert_equal("Provider returned duplicate node name 'Duplicate'", duplicate_error)
 end)
 
-test("bare names are constrained by their facet", function()
+test("wizard preserves false confirmation answers", function()
   require("ziege.config").setup({
-    facet_order = { "source" },
-    facets = {
-      source = { label = "Source Library", kinds = { "class", "interface" } },
+    ui = {
+      input = function() end,
+      select = function(items, _, callback)
+        callback(items[2])
+      end,
     },
   })
-  local model = require("ziege.model")
-  local bare = assert(model.resolve_projected_name("ZCL_ORDER", "source"))
-  assert_equal(2, #bare.choices)
-  assert_true(bare.bare)
-  assert_equal("zcl_order", bare.name)
-  local explicit = assert(model.resolve_projected_name("ZCL_ORDER.clas.abap", "source"))
-  assert_equal("class", explicit.kind)
-  assert_equal("zcl_order", explicit.name)
-  local _, suffix_error = model.resolve_projected_name("ZCL_ORDER.devc", "source")
-  assert_true(suffix_error:find("not allowed", 1, true) ~= nil)
-  local lowercase = assert(model.resolve_projected_name("zcl_order", "source"))
-  assert_equal("zcl_order", lowercase.name)
-  local mixed_case = assert(model.resolve_projected_name("/ZZZ/xtlrfutfrt.clas.abap", "classes"))
-  assert_equal("/zzz/xtlrfutfrt", mixed_case.name)
-
-  require("ziege.config").setup({
-    object_policy = require("ziege.policy").uppercase,
-    facets = {
-      source = { label = "Source Library", kinds = { "class", "interface" } },
-    },
-  })
-  local uppercase = assert(model.resolve_projected_name("zcl_order.clas.abap", "source"))
-  assert_equal("ZCL_ORDER", uppercase.name)
+  local answers
+  require("ziege.wizard").ask({
+    { id = "confirmed", kind = "confirm", prompt = "Continue?" },
+  }, function(result)
+    answers = result
+  end)
+  assert_equal({ confirmed = false }, answers)
 end)
 
-test("Oil integration supports normal ABAP buffer edits", function()
-  local mock = require("ziege.provider.mock").new({
-    systems = {
-      S4 = {
-        transports = { "DEVK900001" },
-        packages = {
-          ["/acme/core"] = { description = "Core package" },
-          ["/acme/other"] = { description = "Other package" },
+test("LSP provider translates filesystem and creation requests", function()
+  local requests = {}
+  local manager = {}
+  function manager:request(root, method, params, callback)
+    table.insert(requests, { root = root, method = method, params = vim.deepcopy(params) })
+    if method == "ziege/project/systems" then
+      callback(nil, {
+        systems = {
+          { name = "S4", folder = "SAP-DEV", provider = "adt", destination = "DEV" },
         },
-        objects = {
-          ["class:/acme/zcl_order"] = {
-            kind = "class",
-            name = "/acme/zcl_order",
-            package = "/acme/core",
-            description = "Order service",
-            source = { "CLASS zcl_order DEFINITION.", "ENDCLASS." },
+      })
+    elseif method == "ziege/fileSystem/readDirectory" then
+      callback(nil, {
+        modifiable = false,
+        entries = {
+          { id = "node:1", name = "Objects", type = "directory", virtualFolder = true },
+          { id = "source:2", name = "zexample.prog.abap", type = "file" },
+        },
+      })
+    elseif method == "ziege/fileSystem/readFile" then
+      callback(nil, {
+        content = "REPORT zexample.\r\nWRITE 'ok'.\r\n",
+        languageId = "abap",
+        revision = '"etag-1"',
+        writable = false,
+      })
+    elseif method == "ziege/objectCreation/options" then
+      callback(nil, { supported = false, forms = {}, transports = {} })
+    elseif method == "ziege/objectCreation/refreshTransports" then
+      callback(nil, { supported = false, transports = {} })
+    elseif method == "ziege/objectCreation/create" then
+      callback(nil, {})
+    else
+      callback("unexpected method")
+    end
+  end
+
+  local provider = require("ziege.provider.lsp").new({ manager = manager })
+  local project
+  provider:load_project("/tmp/example", function(err, result)
+    assert_equal(nil, err)
+    project = result
+  end)
+  assert_equal("S4", project.systems[1].name)
+
+  local system = { name = "S4", project_root = "/tmp/example" }
+  local page
+  provider:list({ system = system, path = {} }, function(err, result)
+    assert_equal(nil, err)
+    page = result
+  end)
+  assert_equal(false, page.modifiable)
+  assert_equal(true, page.entries[1].virtual)
+
+  local file
+  provider:read({ system = system, path = { "source:2" } }, function(err, result)
+    assert_equal(nil, err)
+    file = result
+  end)
+  assert_equal({ "REPORT zexample.", "WRITE 'ok'." }, file.lines)
+  assert_equal(false, file.writable)
+
+  provider:creation_options({ system = system, path = { "node:1" } }, function() end)
+  provider:refresh_transports({
+    system = system,
+    path = { "node:1" },
+    context_token = "token",
+    revision = "1",
+  }, function() end)
+  provider:create_object({
+    system = system,
+    path = { "node:1" },
+    context_token = "token",
+    revision = "2",
+    object_type = "CLAS/OC",
+    answers = { name = "ZCL_EXAMPLE" },
+    transport = "LOCAL",
+  }, function() end)
+
+  assert_equal({
+    "ziege/project/systems",
+    "ziege/fileSystem/readDirectory",
+    "ziege/fileSystem/readFile",
+    "ziege/objectCreation/options",
+    "ziege/objectCreation/refreshTransports",
+    "ziege/objectCreation/create",
+  }, vim.tbl_map(function(request)
+    return request.method
+  end, requests))
+  assert_equal("node:1", requests[4].params.parentId)
+  assert_equal("CLAS/OC", requests[6].params.objectType)
+end)
+
+test("physical portals open a read-only remote tree with explicit actions", function()
+  local workspace_root = vim.fn.tempname()
+  vim.fn.mkdir(workspace_root, "p")
+  vim.fn.writefile({ "local file" }, workspace_root .. "/local.txt")
+  vim.fn.writefile({ "version: 1", "systems:", "  S4:" }, workspace_root .. "/.ziege")
+
+  local calls = {}
+  local created_request
+  local read_request
+  local provider = {}
+  function provider:list(request, callback)
+    table.insert(calls, "list")
+    if #request.path == 0 then
+      callback(nil, {
+        entries = {
+          { id = "objects", name = "Objects", type = "directory", virtual = true },
+          {
+            id = "source",
+            name = "/acme/zcl_example.clas.abap",
+            type = "file",
+            filetype = "abap",
+          },
+        },
+      })
+    else
+      callback(nil, { entries = {} })
+    end
+  end
+  function provider:read(request, callback)
+    table.insert(calls, "read")
+    read_request = vim.deepcopy(request)
+    callback(nil, { lines = { "CLASS zcl_example DEFINITION.", "ENDCLASS." }, filetype = "abap" })
+  end
+  function provider:creation_options(_, callback)
+    table.insert(calls, "options")
+    callback(nil, {
+      supported = true,
+      contextToken = "creation-token",
+      revision = "1",
+      forms = {
+        {
+          id = "PROG/P",
+          label = "Program",
+          questions = {},
+        },
+        {
+          id = "CLAS/OC",
+          label = "Class",
+          questions = {
+            { id = "name", kind = "input", prompt = "Name" },
+            {
+              id = "visibility",
+              kind = "select",
+              prompt = "Visibility",
+              choices = {
+                { label = "Public", value = "public" },
+                { label = "Private", value = "private" },
+              },
+            },
           },
         },
       },
-    },
-  })
-  local provider_routes = {}
-  local mock_list = mock.list
-  function mock:list(route, callback)
-    table.insert(provider_routes, vim.deepcopy(route))
-    mock_list(self, route, callback)
+      transports = {
+        { id = "DEVK900001", label = "DEVK900001: Initial" },
+      },
+    })
   end
-  local ui = {
-    input = function(_, callback)
-      callback("Created by the test wizard")
-    end,
-    select = function(items, _, callback)
+  function provider:refresh_transports(_, callback)
+    table.insert(calls, "refresh-transports")
+    callback(nil, {
+      contextToken = "creation-token",
+      revision = "2",
+      transports = {
+        { id = "LOCAL", label = "Local Object", value = "LOCAL" },
+      },
+    })
+  end
+  function provider:create_object(request, callback)
+    table.insert(calls, "create")
+    created_request = vim.deepcopy(request)
+    callback(nil, {})
+  end
+
+  local project_provider = {}
+  function project_provider:load_project(_, callback)
+    callback(nil, {
+      systems = {
+        { name = "S4", folder = "S4", provider = "mock" },
+      },
+    })
+  end
+
+  local transport_selections = 0
+  local ui = {}
+  function ui.input(opts, callback)
+    assert_equal("Name", opts.prompt)
+    callback("ZCL_CREATED")
+  end
+  function ui.select(items, opts, callback)
+    if opts.prompt == "Object type" then
+      callback(items[2])
+    elseif opts.prompt == "Visibility" then
       callback(items[1])
-    end,
-  }
-  local columns = require("oil.columns")
-  local fallback_renders = 0
-  columns.register("icon", {
-    render = function()
-      fallback_renders = fallback_renders + 1
-      return { "F ", "FallbackIcon" }
-    end,
-    parse = function(line)
-      return line:match("^(%S+)%s+(.*)$")
-    end,
-  })
-  local status = require("ziege").setup({
-    provider = mock,
+    elseif opts.prompt == "Transport" then
+      transport_selections = transport_selections + 1
+      if transport_selections == 1 then
+        callback(items[#items])
+      else
+        callback(items[1])
+      end
+    else
+      error("Unexpected selection prompt " .. tostring(opts.prompt))
+    end
+  end
+
+  require("ziege.project").clear_cache()
+  require("ziege.adapters.oil.route").clear()
+  local conf = require("ziege").setup({
+    default_system = "S4",
+    provider = provider,
+    project_provider = project_provider,
+    providers = { mock = provider },
     ui = ui,
-    icons = {
-      system = { glyph = "S", hl = "SystemIcon" },
-      package = { glyph = "P", hl = "PackageIcon" },
-    },
+    presentation = { namespace_delimiter = "slash" },
   })
-  assert_true(status.supported, status.reason)
+  assert_equal("slash", conf.presentation.namespace_delimiter)
+  assert_equal("slash", conf.daemon.initialization_options.presentation.namespaceDelimiter)
   require("oil").setup({
     adapters = {
       ["abap://"] = "ziege",
       ["oil-test://"] = "test",
     },
     columns = {},
-    skip_confirm_for_simple_edits = false,
   })
-  assert_true(
-    require("oil.config").get_adapter_by_scheme("abap://") ~= nil,
-    "Ziege adapter did not load"
-  )
 
-  local icon_column = assert(columns.get_column(require("oil.adapters.files"), "icon"))
-  local field_meta = require("oil.constants").FIELD_META
-  assert_equal(
-    { "S ", "SystemIcon" },
-    icon_column.render({ [field_meta] = { ziege_system = {} } }, nil, 0)
-  )
-  assert_equal(
-    { "S ", "SystemIcon" },
-    icon_column.render(
-      { [field_meta] = { ziege = { virtual = true, system = "S4" } } },
-      nil,
-      0
-    )
-  )
-  assert_equal(
-    { "P ", "PackageIcon" },
-    icon_column.render({ [field_meta] = { ziege = { kind = "package" } } }, nil, 0)
-  )
-  assert_equal(
-    { "P", "OverrideIcon" },
-    icon_column.render(
-      { [field_meta] = { ziege = { virtual = true, facet = "packages" } } },
-      { add_padding = false, highlight = "OverrideIcon" },
-      0
-    )
-  )
-  assert_equal(
-    { "F ", "FallbackIcon" },
-    icon_column.render({ [field_meta] = {} }, nil, 0),
-    "Normal entries must retain Oil's original icon renderer"
-  )
-  assert_equal(1, fallback_renders)
-
-  local workspace_root = vim.fn.tempname()
-  vim.fn.mkdir(workspace_root, "p")
-  vim.fn.writefile({ "local file" }, workspace_root .. "/local.txt")
-  vim.fn.writefile({
-    "systems:",
-    "  DEV:",
-    "    folder: SAP-DEV",
-    "    url: https://example.invalid",
-  }, workspace_root .. "/.ziege")
-  require("ziege.project").clear_cache()
   local workspace_url = "oil://"
     .. require("oil.util").addslash(require("oil.fs").os_to_posix_path(workspace_root))
   local workspace_buf = open_oil(workspace_url)
-  local workspace_lines = vim.api.nvim_buf_get_lines(workspace_buf, 0, -1, true)
-  local workspace_text = table.concat(workspace_lines, "\n")
-  assert_true(workspace_text:find("SAP-DEV/", 1, true) ~= nil)
-  assert_true(workspace_text:find("local.txt", 1, true) ~= nil)
-
-  local system_line
-  local without_system = vim.deepcopy(workspace_lines)
-  for index = #without_system, 1, -1 do
-    if without_system[index]:find("SAP-DEV/", 1, true) then
-      system_line = index
-      table.remove(without_system, index)
-    end
-  end
-  assert_true(system_line ~= nil)
-  set_lines(workspace_buf, without_system)
-  local parser = require("oil.mutator.parser")
-  local _, protected_errors = parser.parse(workspace_buf)
-  assert_equal(
-    "Virtual system folders cannot be renamed, copied, or deleted",
-    protected_errors[1].message
-  )
-  assert_equal("Error parsing oil buffers", save_oil())
-  assert_true((vim.uv or vim.loop).fs_stat(workspace_root .. "/SAP-DEV") == nil)
-
-  set_lines(workspace_buf, workspace_lines)
-  vim.bo[workspace_buf].modified = false
-  table.insert(workspace_lines, "created.txt")
-  set_lines(workspace_buf, workspace_lines)
-  assert_equal(nil, save_oil())
-  assert_true((vim.uv or vim.loop).fs_stat(workspace_root .. "/created.txt") ~= nil)
-  workspace_lines = vim.api.nvim_buf_get_lines(workspace_buf, 0, -1, true)
-  for index, line in ipairs(workspace_lines) do
-    if line:find("SAP-DEV/", 1, true) then
-      system_line = index
-      break
-    end
-  end
-  vim.api.nvim_win_set_cursor(0, { system_line, 0 })
-  local selected = false
-  require("oil").select(nil, function(err)
-    assert_equal(nil, err)
-    selected = true
-  end)
   wait_for(function()
-    return selected and vim.b.oil_ready and not vim.b.oil_rendering
-  end, "Virtual system did not open")
-  local system_route = assert(require("ziege.route").parse(vim.api.nvim_buf_get_name(0)))
-  assert_equal("DEV", system_route.system)
-  assert_equal("https://example.invalid", system_route.system_config.url)
-  assert_equal(vim.fn.fnamemodify(workspace_root, ":p"), system_route.project_root)
-  assert_equal("https://example.invalid", provider_routes[#provider_routes].system_config.url)
+    return (vim.uv or vim.loop).fs_stat(workspace_root .. "/S4") ~= nil
+  end, "System portal was not created")
+  wait_for(function()
+    return line_with(vim.api.nvim_buf_get_lines(workspace_buf, 0, -1, true), "S4/") ~= nil
+  end, "System portal was not rendered")
+  local workspace_lines = vim.api.nvim_buf_get_lines(workspace_buf, 0, -1, true)
+  assert_true(line_with(workspace_lines, "local.txt") ~= nil)
 
-  local scoped_url = vim.api.nvim_buf_get_name(0)
-  vim.api.nvim_buf_delete(0, { force = true })
-  require("ziege.project").clear_cache()
-  open_oil(scoped_url)
-  local restored_route = assert(require("ziege.route").parse(vim.api.nvim_buf_get_name(0)))
-  assert_equal("DEV", restored_route.system)
-  local system_root_url = scoped_url:gsub("packages/$", "")
-  assert_equal(workspace_url, require("ziege.route").parent(system_root_url))
+  require("oil").open(workspace_url .. "S4/")
+  wait_for(function()
+    return vim.startswith(vim.api.nvim_buf_get_name(0), "abap://")
+      and vim.b.oil_ready
+      and not vim.b.oil_rendering
+  end, "Physical portal did not redirect to the remote tree")
+  local remote_buf = vim.api.nvim_get_current_buf()
+  assert_true(vim.api.nvim_buf_get_name(remote_buf):find("^abap://S4@") ~= nil)
+  assert_true(vim.api.nvim_buf_get_name(remote_buf):find("ziege%-project") == nil)
+  assert_equal(false, vim.bo[remote_buf].modifiable)
+  local remote_lines = vim.api.nvim_buf_get_lines(remote_buf, 0, -1, true)
+  assert_true(line_with(remote_lines, "Objects/") ~= nil)
+  assert_true(line_with(remote_lines, "/acme/zcl_example.clas.abap") ~= nil)
+  assert_true(vim.fn.maparg("<localleader>c", "n") ~= "")
+  assert_true(vim.fn.maparg("<localleader>R", "n") ~= "")
 
-  if vim.api.nvim_buf_is_valid(workspace_buf) then
-    vim.api.nvim_buf_delete(workspace_buf, { force = true })
-  end
-  vim.fn.mkdir(workspace_root .. "/SAP-DEV")
+  require("ziege.adapters.oil.actions").create(remote_buf)
+  assert_equal({ "options", "refresh-transports", "create" }, vim.tbl_filter(function(call)
+    return call ~= "list"
+  end, calls))
+  assert_equal("CLAS/OC", created_request.object_type)
+  assert_equal({ name = "ZCL_CREATED", visibility = "public" }, created_request.answers)
+  assert_equal("LOCAL", created_request.transport)
+  assert_equal("2", created_request.revision)
+
+  local route = require("ziege.adapters.oil.route")
+  local source_url = assert(route.node_url(vim.api.nvim_buf_get_name(remote_buf), "source"))
+  assert_true(vim.endswith(source_url, "/%2Facme%2Fzcl_example.clas.abap"))
+  assert_true(source_url:find("node%3A", 1, true) == nil)
+  require("oil").open(source_url)
+  local source_buf = vim.api.nvim_get_current_buf()
+  wait_for(function()
+    return not require("oil.loading").is_loading(source_buf)
+  end, "Remote source did not finish loading")
+  assert_equal({ "CLASS zcl_example DEFINITION.", "ENDCLASS." }, vim.api.nvim_buf_get_lines(source_buf, 0, -1, true))
+  assert_equal(false, vim.bo[source_buf].modifiable)
+  assert_equal({ "source" }, read_request.path)
+
+  vim.fn.delete(workspace_root .. "/S4", "d")
+  vim.api.nvim_exec_autocmds("User", { pattern = "OilActionsPost", modeline = false })
+  wait_for(function()
+    return (vim.uv or vim.loop).fs_stat(workspace_root .. "/S4") ~= nil
+  end, "Deleted system portal was not recreated")
+
+  local nested_root = workspace_root .. "/nested"
+  vim.fn.mkdir(nested_root, "p")
+  vim.fn.writefile({ "systems:", "  S4:" }, nested_root .. "/.ziege")
+  local nested_url = "oil://"
+    .. require("oil.util").addslash(require("oil.fs").os_to_posix_path(nested_root))
+  open_oil(nested_url)
+  wait_for(function()
+    return (vim.uv or vim.loop).fs_stat(nested_root .. "/S4") ~= nil
+  end, "Nested project did not create its own portal")
+
+  vim.fn.writefile({ "must remain local" }, workspace_root .. "/S4/local.txt")
   local original_notify = vim.notify
   vim.notify = function() end
-  local collision_buf = open_oil(workspace_url)
+  local local_portal_buf = open_oil(workspace_url .. "S4/")
   vim.notify = original_notify
-  local collision_entry
-  for line_number, line in ipairs(vim.api.nvim_buf_get_lines(collision_buf, 0, -1, true)) do
-    if line:find("SAP-DEV/", 1, true) then
-      collision_entry = require("oil").get_entry_on_line(collision_buf, line_number)
-      break
-    end
-  end
-  assert_true(collision_entry ~= nil)
-  assert_true(not collision_entry.meta or not collision_entry.meta.ziege_system)
-  vim.fn.delete(workspace_root .. "/SAP-DEV", "d")
+  assert_equal(workspace_url .. "S4/", vim.api.nvim_buf_get_name(local_portal_buf))
+  assert_equal({ "must remain local" }, vim.fn.readfile(workspace_root .. "/S4/local.txt"))
 
-  local package_buf = open_oil("abap://S4/packages/")
-  local package_lines = vim.api.nvim_buf_get_lines(package_buf, 0, -1, true)
-  assert_true(package_lines[1]:find("/acme/core.devc", 1, true) ~= nil)
-  set_lines(package_buf, vim.list_extend(vim.deepcopy(package_lines), { "ZNEWPKG" }))
-  assert_equal(nil, save_oil())
-  assert_true(mock.systems.S4.packages.znewpkg ~= nil)
-  local package_text = table.concat(vim.api.nvim_buf_get_lines(package_buf, 0, -1, true), "\n")
-  assert_true(package_text:find("znewpkg.devc/", 1, true) ~= nil)
-
-  local package_root = open_oil("abap://S4/packages/%2Facme%2Fcore.devc/")
-  assert_equal(false, vim.bo[package_root].modifiable, "Virtual facet roots must be read-only")
-  local root_text = table.concat(vim.api.nvim_buf_get_lines(package_root, 0, -1, true), "\n")
-  assert_true(root_text:find("Classes/", 1, true) ~= nil)
-  assert_true(root_text:find("Interfaces/", 1, true) ~= nil)
-
-  local class_url = "abap://S4/packages/%2Facme%2Fcore.devc/classes/"
-  local class_buf = open_oil(class_url)
-  local original_lines = vim.api.nvim_buf_get_lines(class_buf, 0, -1, true)
-  assert_equal(1, #original_lines)
-  assert_true(original_lines[1]:find("/acme/zcl_order.clas.abap", 1, true) ~= nil)
-
-  local unchanged_diffs, unchanged_errors = parser.parse(class_buf)
-  assert_equal({}, unchanged_diffs, "An untouched display name must not produce actions")
-  assert_equal({}, unchanged_errors)
-
-  set_lines(
-    class_buf,
-    vim.list_extend(vim.deepcopy(original_lines), {
-      "/ACME/ZIF_WRONG.intf.abap",
-    })
-  )
-  local _, suffix_errors = parser.parse(class_buf)
-  assert_equal(1, #suffix_errors)
-  assert_true(suffix_errors[1].message:find("not allowed", 1, true) ~= nil)
-
-  set_lines(
-    class_buf,
-    vim.list_extend(vim.deepcopy(original_lines), {
-      "/ACME/ZCL_NEW",
-    })
-  )
-  vim.api.nvim_win_set_cursor(0, { 2, 0 })
-  local create_diffs, create_errors = parser.parse(class_buf)
-  assert_equal({}, create_errors)
-  assert_equal("%2FACME%2FZCL_NEW", create_diffs[1].name)
-  assert_true(create_diffs[1].name:find("/", 1, true) == nil, "The Oil name must remain atomic")
-  assert_equal(nil, save_oil())
-  assert_true(mock.systems.S4.objects["class:/acme/zcl_new"] ~= nil)
-  assert_equal(
-    "%2Facme%2Fzcl_new.clas.abap",
-    require("oil").get_cursor_entry().name,
-    "Cursor should follow a bare name after its suffix is added"
-  )
-
-  local created_lines = vim.api.nvim_buf_get_lines(class_buf, 0, -1, true)
-  local created_index
-  for index, line in ipairs(created_lines) do
-    if line:find("/acme/zcl_new.clas.abap", 1, true) then
-      created_index = index
-      created_lines[index] = line:gsub("zcl_new", "ZCL_RENAMED")
-      break
-    end
-  end
-  assert_true(created_index ~= nil, "Created class was not rerendered with its canonical suffix")
-  set_lines(class_buf, created_lines)
-  assert_equal(nil, save_oil())
-  assert_true(mock.systems.S4.objects["class:/acme/zcl_new"] == nil)
-  assert_true(mock.systems.S4.objects["class:/acme/zcl_renamed"] ~= nil)
-
-  local renamed_lines = vim.api.nvim_buf_get_lines(class_buf, 0, -1, true)
-  for index = #renamed_lines, 1, -1 do
-    if renamed_lines[index]:find("/acme/zcl_renamed.clas.abap", 1, true) then
-      table.remove(renamed_lines, index)
-    end
-  end
-  set_lines(class_buf, renamed_lines)
-  assert_equal(nil, save_oil())
-  assert_true(mock.systems.S4.objects["class:/acme/zcl_renamed"] == nil)
-
-  local source_lines = vim.api.nvim_buf_get_lines(class_buf, 0, -1, true)
-  local order_line
-  for index = #source_lines, 1, -1 do
-    if source_lines[index]:find("/acme/zcl_order.clas.abap", 1, true) then
-      order_line = table.remove(source_lines, index)
-    end
-  end
-  assert_true(order_line ~= nil)
-  local destination_buf = open_oil("abap://S4/packages/%2Facme%2Fother.devc/classes/")
-  set_lines(class_buf, source_lines)
-  set_lines(destination_buf, { order_line })
-  assert_equal(nil, save_oil())
-  assert_equal("/acme/other", mock.systems.S4.objects["class:/acme/zcl_order"].package)
-
-  local replacement_lines = vim.api.nvim_buf_get_lines(destination_buf, 0, -1, true)
-  for index, line in ipairs(replacement_lines) do
-    if line:find("/acme/zcl_order.clas.abap", 1, true) then
-      replacement_lines[index] = line:gsub("zcl_order", "ZCL_ORDER_2")
-    end
-  end
-  table.insert(replacement_lines, "/ACME/ZCL_ORDER")
-  set_lines(destination_buf, replacement_lines)
-  assert_equal(nil, save_oil())
-  assert_true(mock.systems.S4.objects["class:/acme/zcl_order"] ~= nil)
-  assert_true(mock.systems.S4.objects["class:/acme/zcl_order_2"] ~= nil)
-  local performed = #mock.performed
-
-  local noop_lines = vim.api.nvim_buf_get_lines(destination_buf, 0, -1, true)
-  for index, line in ipairs(noop_lines) do
-    if line:find("/acme/zcl_order_2.clas.abap", 1, true) then
-      noop_lines[index] = line:gsub("%.clas%.abap", "")
-    end
-  end
-  set_lines(destination_buf, noop_lines)
-  assert_equal(nil, save_oil())
-  assert_equal(performed, #mock.performed, "Removing a redundant suffix must be a no-op")
-
-  local object_url = "abap://S4/packages/%2Facme%2Fother.devc/classes/"
-    .. "%2Facme%2Fzcl_order_2.clas.abap"
-  require("oil").open(object_url)
-  local object_buf = vim.api.nvim_get_current_buf()
-  local loaded = vim.wait(3000, function()
-    return not require("oil.loading").is_loading(object_buf)
-      and vim.bo[object_buf].filetype == "abap"
-  end, 10)
-  assert_true(loaded, "ABAP object did not finish loading: " .. vim.inspect({
-    loading = require("oil.loading").is_loading(object_buf),
-    filetype = vim.bo[object_buf].filetype,
-    lines = vim.api.nvim_buf_get_lines(object_buf, 0, -1, true),
-    error = vim.v.errmsg,
-  }))
-  assert_equal(
-    { "CLASS zcl_order DEFINITION.", "ENDCLASS." },
-    vim.api.nvim_buf_get_lines(object_buf, 0, -1, true)
-  )
-  assert_equal(
-    "abap://S4/packages/%2Facme%2Fother.devc/classes/",
-    require("oil").get_buffer_parent_url(object_url, true)
-  )
-  set_lines(object_buf, { "CLASS zcl_order_2 DEFINITION.", "ENDCLASS." })
-  vim.cmd.write()
-  assert_equal(false, vim.bo[object_buf].modifiable, "Object buffer must be locked during a write")
-  wait_for(function()
-    return vim.bo[object_buf].modifiable and not vim.bo[object_buf].modified
-  end, "ABAP object did not finish writing")
-  assert_equal(
-    { "CLASS zcl_order_2 DEFINITION.", "ENDCLASS." },
-    mock.systems.S4.objects["class:/acme/zcl_order_2"].source
-  )
-
-  vim.api.nvim_set_current_buf(destination_buf)
-
-  local before_cancel = vim.api.nvim_buf_get_lines(destination_buf, 0, -1, true)
-  set_lines(destination_buf, vim.list_extend(vim.deepcopy(before_cancel), { "/ACME/ZCL_CANCEL" }))
-  ui.input = function(_, callback)
-    callback(nil)
-  end
-  assert_equal("Canceled", save_oil())
-  assert_true(vim.bo[destination_buf].modified, "Cancellation must preserve Oil modifications")
-  assert_true(mock.systems.S4.objects["class:/acme/zcl_cancel"] == nil)
-  set_lines(destination_buf, before_cancel)
-  vim.bo[destination_buf].modified = false
-
-  local normal_buf = open_oil("oil-test:///foo/")
-  set_lines(normal_buf, { "/ACME/NOT_ABAP" })
-  local _, normal_errors = parser.parse(normal_buf)
-  assert_equal("Paths cannot start with '/'", normal_errors[1].message)
-  local performed_before_normal_save = #mock.performed
-  set_lines(normal_buf, { "normal.txt" })
-  assert_equal(nil, save_oil())
-  assert_equal(performed_before_normal_save, #mock.performed)
-
-  local root_buf = open_oil("abap://")
-  local root_lines = table.concat(vim.api.nvim_buf_get_lines(root_buf, 0, -1, true), "\n")
-  assert_true(root_lines:find("S4/", 1, true) ~= nil)
-
-  local broken_root = vim.fn.tempname()
-  vim.fn.mkdir(broken_root, "p")
-  vim.fn.writefile({ "still visible" }, broken_root .. "/local.txt")
-  vim.fn.writefile({ "systems: [" }, broken_root .. "/.ziege")
-  require("ziege.project").clear_cache()
-  original_notify = vim.notify
-  vim.notify = function() end
-  local broken_url = "oil://"
-    .. require("oil.util").addslash(require("oil.fs").os_to_posix_path(broken_root))
-  local broken_buf = open_oil(broken_url)
-  vim.notify = original_notify
-  local broken_text = table.concat(vim.api.nvim_buf_get_lines(broken_buf, 0, -1, true), "\n")
-  assert_true(broken_text:find("local.txt", 1, true) ~= nil)
-  vim.fn.delete(broken_root, "rf")
   vim.fn.delete(workspace_root, "rf")
+end)
+
+test("nonempty directories and symlinks are not claimed as portals", function()
+  local portal = require("ziege.adapters.oil.portal")
+  local project = require("ziege.project")
+  local root = vim.fn.tempname()
+  vim.fn.mkdir(root .. "/S4", "p")
+  vim.fn.writefile({ "owned locally" }, root .. "/S4/local.txt")
+  vim.fn.writefile({ "systems:", "  S4:" }, root .. "/.ziege")
+  project.clear_cache()
+
+  local err
+  portal.load_directory(root, function(load_error)
+    err = load_error
+  end)
+  wait_for(function()
+    return err ~= nil
+  end)
+  assert_true(err:find("must be empty", 1, true) ~= nil)
+  assert_equal(nil, portal.system_for_path(root .. "/S4"))
+  assert_equal({ "owned locally" }, vim.fn.readfile(root .. "/S4/local.txt"))
+
+  vim.fn.delete(root .. "/S4", "rf")
+  vim.uv.fs_symlink(root, root .. "/S4")
+  project.clear_cache()
+  err = nil
+  portal.load_directory(root, function(load_error)
+    err = load_error
+  end)
+  wait_for(function()
+    return err ~= nil
+  end)
+  assert_true(err:find("conflicts with a link", 1, true) ~= nil)
+  assert_equal(nil, portal.system_for_path(root .. "/S4"))
+  vim.fn.delete(root, "rf")
+end)
+
+test("invalid provider folder types are callback errors", function()
+  local root = vim.fn.tempname()
+  vim.fn.mkdir(root, "p")
+  vim.fn.writefile({ "systems:", "  S4:" }, root .. "/.ziege")
+  local provider = { list = function() end, read = function() end }
+  require("ziege.config").setup({
+    provider = provider,
+    project_provider = {
+      load_project = function(_, _, callback)
+        callback(nil, { systems = { { name = "S4", folder = 42 } } })
+      end,
+    },
+  })
+  require("ziege.project").clear_cache()
+  local err
+  require("ziege.project").load_directory(root, function(load_error)
+    err = load_error
+  end)
+  wait_for(function()
+    return err ~= nil
+  end)
+  assert_true(err:find("System folder names must be non-empty strings", 1, true) ~= nil)
+  vim.fn.delete(root, "rf")
 end)
 
 for _, spec in ipairs(tests) do
